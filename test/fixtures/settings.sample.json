@@ -1,0 +1,41 @@
+{
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "60"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(git status:*)"
+    ],
+    "deny": [
+      "Bash(rm -rf ~)"
+    ]
+  },
+  "model": "opusplan",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CMD=$(jq -r '.tool_input.command // empty'); if echo \"$CMD\" | grep -qE '(curl|wget).*\\|.*sh'; then echo '{\"decision\":\"block\"}' >&2; exit 2; fi; exit 0",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/squirt-guard.sh"
+          },
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/sed-guard.sh",
+            "timeout": 5
+          },
+          {
+            "type": "command",
+            "command": "command -v tally >/dev/null 2>&1 || exit 0; tally hook pre-bash"
+          }
+        ]
+      }
+    ]
+  }
+}

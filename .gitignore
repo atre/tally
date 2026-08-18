@@ -1,0 +1,9 @@
+node_modules/
+dist/
+test-dist/
+*.log
+.DS_Store
+FEEDBACK.md
+.snuff/
+reports/*
+!reports/.gitkeep

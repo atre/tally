@@ -1,0 +1,8 @@
+{
+  "_note": "estimates — verify against the current price list before trusting; $ per 1M tokens",
+  "claude-fable-5": { "input": 15, "output": 75, "cacheRead": 1.5, "cacheWrite": 18.75 },
+  "claude-opus-5": { "input": 15, "output": 75, "cacheRead": 1.5, "cacheWrite": 18.75 },
+  "claude-opus-4-8": { "input": 15, "output": 75, "cacheRead": 1.5, "cacheWrite": 18.75 },
+  "claude-sonnet-5": { "input": 3, "output": 15, "cacheRead": 0.3, "cacheWrite": 3.75 },
+  "claude-haiku-4-5-20251001": { "input": 1, "output": 5, "cacheRead": 0.1, "cacheWrite": 1.25 }
+}
