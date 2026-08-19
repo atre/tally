@@ -283,10 +283,10 @@ test('poolpool: usage merge collapses to one row per project, opt-in only', asyn
   // real /usage shape (verified against ~/git/poolpool/src/api.ts): camelCase, already
   // Number()-converted, grouped by (project, type, profile) — collapse to per-project.
   const rows = mapPoolpoolRows([
-    { project: 'aigen', type: 'sync', profile: 'a', totalJobs: 3, completed: 3, failed: 0, inputTokens: 1000, outputTokens: 200, durationMs: 500 },
-    { project: 'aigen', type: 'async', profile: 'b', totalJobs: 1, completed: 1, failed: 0, inputTokens: 100, outputTokens: 50, durationMs: 100 },
+    { project: 'acme', type: 'sync', profile: 'a', totalJobs: 3, completed: 3, failed: 0, inputTokens: 1000, outputTokens: 200, durationMs: 500 },
+    { project: 'acme', type: 'async', profile: 'b', totalJobs: 1, completed: 1, failed: 0, inputTokens: 100, outputTokens: 50, durationMs: 100 },
   ]);
-  assert.deepEqual(rows, [{ project: 'aigen', jobs: 4, input: 1100, output: 250 }]);
+  assert.deepEqual(rows, [{ project: 'acme', jobs: 4, input: 1100, output: 250 }]);
 
   const s = await scan({ dir: FIX, since: 0 });
   const r = analyze(s, 0, Date.parse('2026-08-16T00:00:00Z'));
@@ -484,7 +484,7 @@ test('hook post-bash-mark + stop-feedback: FEEDBACK.md enforcement, never loops 
 test('renderJson includes fetched poolpool rows (text/md already do)', async () => {
   const s = await scan({ dir: FIX, since: 0 });
   const r = analyze(s, 0, Date.parse('2026-08-16T00:00:00Z'));
-  const rows = [{ project: 'aigen', jobs: 4, input: 1100, output: 250 }];
+  const rows = [{ project: 'acme', jobs: 4, input: 1100, output: 250 }];
   const withPoolpool = JSON.parse(renderJson(r, 3, undefined, rows));
   assert.deepEqual(withPoolpool.poolpool, rows);
   const without = JSON.parse(renderJson(r, 3));
