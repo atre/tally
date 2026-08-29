@@ -20,6 +20,8 @@ export interface HookInput {
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_response?: unknown;
+  agent_id?: string; // set only when the hook fires from inside a subagent (AgentTool worker/fork); session_id + transcript_path are still the PARENT session's (verified in the Claude Code 2.1.251 bundle, 2026-08-30)
+  agent_type?: string;
   stop_hook_active?: boolean; // Stop event: true when this is itself a re-invocation from a prior Stop block — never re-block, or it loops
 }
 
@@ -473,6 +475,10 @@ function loadMarks(path: string): Marks | null {
 function runPostBashMark(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
   if (!command || !input.session_id) return { exit: 0, stdout: '' };
+  // A subagent's tool calls fire the parent's hooks under the parent's session_id — marking here would make
+  // stop-feedback nag the human's session for a worker's probe (2026-08-30: a fork ran `squirt init --help`,
+  // the hub session got blocked for squirt). Only the main thread's own invocations count as dogfooding.
+  if (input.agent_id) return { exit: 0, stdout: '' };
   const home = gitHome(env);
   // command-position match only (parse.ts usedToolsCertain), and only segments that CERTAINLY ran
   // given the overall exit was 0 (PostToolUse(Bash) never fires otherwise) — `pulse --brief` /

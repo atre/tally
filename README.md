@@ -151,7 +151,9 @@ response JSON (or, for a hard block, exit 2 with a stderr message):
 - **`post-bash-mark`** (PostToolUse `Bash`) — notes which personal CLIs
   (looksy/peep/squirt/tally/snuff/brief, or `TALLY_TOOLS`) a session actually
   invoked from outside their own repo — command position only, so `pulse --brief`
-  or `cd ~/git/brief` don't count. Never blocks.
+  or `cd ~/git/brief` don't count. Tool calls made inside a subagent (`agent_id`
+  in the hook input) don't count either — the parent session isn't nagged for a
+  worker's probe. Never blocks.
 - **`stop-feedback`** (Stop) — blocks (exit 2) when a marked tool's
   `~/git/<tool>/FEEDBACK.md` wasn't touched since; the one hook that can block.
 

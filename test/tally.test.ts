@@ -564,6 +564,11 @@ test('hook post-bash-mark + stop-feedback: FEEDBACK.md enforcement, never loops 
   // a SUBDIRECTORY of squirt's own repo must also be excluded, not just the exact root
   const ownSubdir = runHook('post-bash-mark', { session_id: 'own-subdir', cwd: join(gitDir, 'squirt', 'src'), tool_input: { command: 'squirt x.log' } }, env);
   assert.equal(ownSubdir.exit, 0);
+
+  // a tool call made INSIDE a subagent (agent_id set) fires the parent's hook with the parent's session_id — must not mark
+  const sub = runHook('post-bash-mark', { session_id: 'parent-of-fork', agent_id: 'agent-abc123', cwd: '/x/git/other', tool_input: { command: 'squirt init --help' } }, env);
+  assert.equal(sub.exit, 0);
+  assert.equal(runHook('stop-feedback', { session_id: 'parent-of-fork' }, env).exit, 0, 'a subagent invocation must not mark the parent session');
   assert.equal(runHook('stop-feedback', { session_id: 'own-subdir' }, env).exit, 0, 'a subdirectory of the tool\'s own repo is not "used elsewhere" either');
 
   const noFeedbackYet = runHook('stop-feedback', { session_id: 'abc' }, env);
