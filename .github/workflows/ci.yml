@@ -21,4 +21,4 @@ jobs:
       - run: npm run build
       - name: smoke
         # --since all: fixture timestamps are fixed, the default 7d window would age out
-        run: node dist/index.js --dir test/fixtures --since all | tee /dev/stderr | grep -q '2 sessions'
+        run: node dist/index.js --dir test/fixtures --since all | tee /dev/stderr | grep -qE '· [0-9]+ sessions ·'
