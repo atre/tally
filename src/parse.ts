@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs';
 import { createInterface } from 'node:readline';
-import type { HookOutput, ToolCall, Turn, Usage } from './types.js';
+import type { HookOutput, HookRun, ToolCall, Turn, Usage } from './types.js';
 
 export function emptyUsage(): Usage {
   return { input: 0, output: 0, cacheRead: 0, cacheCreate: 0 };
@@ -234,7 +234,9 @@ export interface ParsedFile {
   turns: Turn[];
   calls: ToolCall[];
   hookOutputs: HookOutput[];
+  hookRuns: HookRun[];
   prompts: Prompt[];
+  earliestTs: number; // min timestamp over ALL records in the file, before the since-filter (0 = none)
 }
 
 export interface Prompt {
@@ -258,6 +260,7 @@ interface Rec {
     hookEvent?: string;
     hookName?: string;
     content?: unknown;
+    command?: unknown;
   };
   message?: {
     model?: string;
@@ -282,7 +285,9 @@ export class TranscriptParser {
   readonly turns: Turn[] = [];
   readonly calls: ToolCall[] = [];
   readonly hookOutputs: HookOutput[] = [];
+  readonly hookRuns: HookRun[] = [];
   readonly prompts: Prompt[] = [];
+  earliestTs = 0;
   private seenReq = new Set<string>();
   private pending = new Map<string, ToolCall>();
   private fileSession = '';
@@ -300,6 +305,7 @@ export class TranscriptParser {
     }
     if (o.type !== 'assistant' && o.type !== 'user' && o.type !== 'attachment') return ev;
     const ts = o.timestamp ? Date.parse(o.timestamp) : 0;
+    if (ts && (!this.earliestTs || ts < this.earliestTs)) this.earliestTs = ts;
     if (ts && ts < this.since) return ev;
     const sessionId = o.sessionId ?? this.fileSession;
     if (!this.fileSession && o.sessionId) this.fileSession = o.sessionId;
@@ -307,16 +313,33 @@ export class TranscriptParser {
 
     if (o.type === 'attachment') {
       const a = o.attachment;
-      if (a && a.type === 'hook_success' && typeof a.content === 'string' && a.content.length > 0) {
-        this.hookOutputs.push({
-          id: o.uuid ?? '',
-          sessionId,
-          project,
-          hook: a.hookEvent ?? a.hookName ?? 'unknown',
-          chars: a.content.length,
-          timestamp: ts,
-          isSidechain: Boolean(o.isSidechain),
-        });
+      if (a && a.type === 'hook_success') {
+        const hook = a.hookEvent ?? a.hookName ?? 'unknown';
+        // hookOutputs = what entered context; hookRuns = the process ran at all (a green
+        // radar or passing Stop gate injects nothing but still counts as a run)
+        if (typeof a.content === 'string' && a.content.length > 0) {
+          this.hookOutputs.push({
+            id: o.uuid ?? '',
+            sessionId,
+            project,
+            hook,
+            chars: a.content.length,
+            timestamp: ts,
+            isSidechain: Boolean(o.isSidechain),
+          });
+        }
+        if (typeof a.command === 'string' && a.command.trim()) {
+          this.hookRuns.push({
+            id: o.uuid ?? '',
+            sessionId,
+            project,
+            cwd: o.cwd,
+            hook,
+            command: a.command,
+            timestamp: ts,
+            isSidechain: Boolean(o.isSidechain),
+          });
+        }
       }
       return ev;
     }
@@ -398,5 +421,5 @@ export async function parseTranscript(path: string, slug: string, since = 0): Pr
   const p = new TranscriptParser(slug, since);
   const rl = createInterface({ input: createReadStream(path, { encoding: 'utf8' }), crlfDelay: Infinity });
   for await (const line of rl) p.push(line);
-  return { turns: p.turns, calls: p.calls, hookOutputs: p.hookOutputs, prompts: p.prompts };
+  return { turns: p.turns, calls: p.calls, hookOutputs: p.hookOutputs, hookRuns: p.hookRuns, prompts: p.prompts, earliestTs: p.earliestTs };
 }

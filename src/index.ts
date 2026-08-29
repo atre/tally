@@ -15,7 +15,7 @@ import { cmdHooks, runHook } from './hooks.js';
 import type { HookInput } from './hooks.js';
 import { readFile as readFileAsync } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { builtinReport, skillsReport, parseGuardLog, toolsReport } from './tools.js';
+import { builtinReport, hookRunsReport, skillsReport, parseGuardLog, toolsReport } from './tools.js';
 import { fatFiles, residentFiles } from './files.js';
 
 async function readStdin(): Promise<string> {
@@ -97,7 +97,8 @@ async function main(): Promise<number> {
       return 1;
     }
     if (args.toolsBuiltin) {
-      console.log(renderBuiltin(builtinReport(s.calls)));
+      const rows = builtinReport(s.calls);
+      console.log(args.json ? JSON.stringify({ builtin: rows }, null, 2) : renderBuiltin(rows));
       return 0;
     }
     let guardLog = '';
@@ -107,7 +108,13 @@ async function main(): Promise<number> {
       // no guard.log yet — no hooks have blocked/rewritten anything
     }
     const tools = process.env.TALLY_TOOLS ? process.env.TALLY_TOOLS.split(',').map((t) => t.trim()).filter(Boolean) : undefined;
-    console.log(renderTools(toolsReport(s.calls, tools), skillsReport(s.calls), parseGuardLog(guardLog)));
+    const report = {
+      tools: toolsReport(s.calls, tools),
+      hookRuns: hookRunsReport(s.hookRuns, tools),
+      skills: skillsReport(s.calls),
+      guards: parseGuardLog(guardLog),
+    };
+    console.log(args.json ? JSON.stringify(report, null, 2) : renderTools(report.tools, report.hookRuns, report.skills, report.guards));
     return 0;
   }
   if (args.cmd === 'diff') {

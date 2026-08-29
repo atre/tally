@@ -1,6 +1,6 @@
 import type { Report, Usage } from './types.js';
 import type { PoolpoolRow } from './poolpool.js';
-import type { BuiltinRow, GuardRow, SkillRow, ToolUsageRow } from './tools.js';
+import type { BuiltinRow, GuardRow, HookRunRow, SkillRow, ToolUsageRow } from './tools.js';
 import type { FatFileRow, ResidentRow } from './files.js';
 
 export function fmt(n: number): string {
@@ -101,7 +101,7 @@ export function renderText(r: Report, opts: { top: number; by?: 'session' | 'day
   for (const h of heaviestRows) {
     const cross = h.crossLimit ? `>${fmt(r.ctxLimit)}@t${h.crossLimit.turn}` : `>${fmt(r.ctxLimit)}@—`;
     const intent = h.firstPrompt ? `  "${cap(h.firstPrompt.replace(/\s+/g, ' ').trim(), 40)}"` : '';
-    L.push(`  ${h.id}  ${pad(cap(h.project, 23), 24)}${rpad(String(h.turns), 5)} turns  ctx ~${rpad(fmt(h.avgContext), 5)}/turn  read ${rpad(fmt(h.cacheRead), 6)}  out ${rpad(fmt(h.output), 5)}  ${cross}${intent}`);
+    L.push(`  ${h.id}  ${pad(cap(h.project, 23), 24)}${rpad(String(h.turns), 5)} turns  ctx ~${rpad(fmt(h.avgContext), 5)}/turn  read ${rpad(fmt(h.cacheRead), 6)}  out ${rpad(fmt(h.output), 5)}  ${cross}${intent}${h.partial ? '  (partial, started before window)' : ''}`);
   }
   L.push('');
   L.push('leaks (est. tokens that entered context)');
@@ -138,13 +138,19 @@ export function renderBrief(r: Report): string {
 }
 
 /** `tally tools`: sunset-by-data — invocations per personal CLI/skill/guard outcome per month. */
-export function renderTools(rows: ToolUsageRow[], skills: SkillRow[], guards: GuardRow[]): string {
+export function renderTools(rows: ToolUsageRow[], hookRuns: HookRunRow[], skills: SkillRow[], guards: GuardRow[]): string {
   const L: string[] = [];
   L.push('tool                 month    calls  projects');
   if (!rows.length) L.push('  none');
   for (const r of rows) {
     const note = r.flag ? '  ← < 5: merge/archive?' : '';
     L.push(`  ${pad(cap(r.tool, 18), 19)}${pad(r.month, 9)}${rpad(String(r.calls), 6)}${rpad(String(r.projects), 9)}${note}`);
+  }
+  L.push('');
+  L.push('hook-runs            month    event          runs  projects');
+  if (!hookRuns.length) L.push('  none recorded — transcripts predate attachment.command');
+  for (const h of hookRuns) {
+    L.push(`  ${pad(cap(h.tool, 18), 19)}${pad(h.month, 9)}${pad(cap(h.hook, 13), 14)}${rpad(String(h.runs), 5)}${rpad(String(h.projects), 9)}`);
   }
   L.push('');
   L.push('skills' + ' '.repeat(19) + 'month    calls');
@@ -230,7 +236,7 @@ export function renderMd(r: Report, opts: { top: number; by?: 'session' | 'day' 
   L.push('|---|---|--:|--:|--:|:-:|--:|---|');
   for (const h of heaviestRows) {
     const intent = h.firstPrompt ? cap(h.firstPrompt.replace(/\s+/g, ' ').trim(), 40) : '—';
-    L.push(`| ${h.id} | ${h.project} | ${h.turns} | ${fmt(h.avgContext)} | ${fmt(h.peakCtx)} | ${h.crossLimit ? 't' + h.crossLimit.turn : '—'} | ${h.burnedAbove ? '~' + fmt(h.burnedAbove) : '0'} | ${intent} |`);
+    L.push(`| ${h.id} | ${h.project} | ${h.turns}${h.partial ? ' (partial)' : ''} | ${fmt(h.avgContext)} | ${fmt(h.peakCtx)} | ${h.crossLimit ? 't' + h.crossLimit.turn : '—'} | ${h.burnedAbove ? '~' + fmt(h.burnedAbove) : '0'} | ${intent} |`);
   }
   L.push('');
 

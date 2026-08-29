@@ -160,7 +160,7 @@ export function parseArgs(argv: string[], now = Date.now()): Args {
   const UNSUPPORTED_FLAGS: Partial<Record<string, (keyof Args)[]>> = {
     diff: ['md', 'brief', 'cost', 'poolpool'],
     snap: ['json', 'md', 'brief', 'poolpool'],
-    tools: ['json', 'md', 'brief', 'cost', 'poolpool'],
+    tools: ['md', 'brief', 'cost', 'poolpool'],
     hook: ['json', 'md', 'brief', 'cost', 'poolpool'],
     hooks: ['json', 'md', 'brief', 'cost', 'poolpool'],
     trace: ['json', 'md', 'brief', 'cost', 'poolpool'],
@@ -179,7 +179,7 @@ usage: tally [--since 7d] [--project <slug-substr>] [--top 5] [--ctx-limit 150k]
        tally diff [name]                     diff the live scan against a saved snapshot
        tally hook <pre-bash|pre-read|ctx-guard|post-tool|post-bash-mark|stop-feedback>   read a Claude Code hook event from stdin, act on it
        tally hooks --install [--global] [--keep-legacy] [--target <config-dir>] | --print | --list | --suggest   wire tally's hooks into .claude/settings.json (--install absorbs the hand-written curl|sh + sed-guard.sh hooks pre-bash covers unless --keep-legacy, and runs squirt init --claude when squirt is on PATH; --list: show every configured hook + who owns it; --suggest: print-only, top error heads → a guard to consider)
-       tally tools [--since 30d]             invocations per personal CLI/skill per month (default 30d) — < 5 outside its own repo → merge/archive candidate
+       tally tools [--since 30d] [--json]    invocations per personal CLI/skill per month, incl. hook-fired runs (SessionStart/Stop radars; default 30d) — < 5 outside its own repo → merge/archive candidate
        tally tools --builtin                 per-built-in-tool call counts (Bash/Read/Agent/…) across projects
        tally files [--top 20] [-p <repo>]    (alias: tally --fat-files) files ranked by tokens × turns they stay in context — what to split, grep instead of read, or archive
 

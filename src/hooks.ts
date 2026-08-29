@@ -1,8 +1,8 @@
-import { execFileSync } from 'node:child_process';
 import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { BIG_RESULT_CHARS, DEFAULT_CTX_LIMIT, bashLooksLikeLogDump, stripForCurlShCheck, stripNonCodeSpans } from './analyze.js';
+import { bashReadTarget } from './files.js';
 import { cap, fmt, pad } from './render.js';
 import { escapeRegExp, estTokens, isWithinDir, usedToolsCertain } from './parse.js';
 
@@ -167,12 +167,18 @@ function logGuard(env: NodeJS.ProcessEnv, rule: string, outcome: 'blocked' | 're
   }
 }
 
-function allow(input: HookInput, updatedInput: Record<string, unknown>, reason: string, env: NodeJS.ProcessEnv, rule: string): HookResult {
+function allow(input: HookInput, updatedInput: Record<string, unknown>, reason: string, env: NodeJS.ProcessEnv, rule: string, additionalContext?: string): HookResult {
   logGuard(env, rule, 'rewritten');
   return {
     exit: 0,
     stdout: JSON.stringify({
-      hookSpecificOutput: { hookEventName: input.hook_event_name || 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: reason, updatedInput },
+      hookSpecificOutput: {
+        hookEventName: input.hook_event_name || 'PreToolUse',
+        permissionDecision: 'allow',
+        permissionDecisionReason: reason,
+        updatedInput,
+        ...(additionalContext ? { additionalContext } : {}),
+      },
     }),
   };
 }
@@ -180,6 +186,11 @@ function allow(input: HookInput, updatedInput: Record<string, unknown>, reason: 
 function block(message: string, env: NodeJS.ProcessEnv, rule: string): HookResult {
   logGuard(env, rule, 'blocked');
   return { exit: 2, stdout: '', message };
+}
+
+/** context-only payload: a hint that rides along with the call, never a rewrite or a block */
+function context(input: HookInput, additionalContext: string): HookResult {
+  return { exit: 0, stdout: JSON.stringify({ hookSpecificOutput: { hookEventName: input.hook_event_name || 'PreToolUse', additionalContext } }) };
 }
 
 // (sudo|env|exec )? — the common wrappers between a pipe and the shell name; still a regex,
@@ -286,6 +297,23 @@ function squirtOnPath(env: NodeJS.ProcessEnv): boolean {
   return (env.PATH || '').split(sep).some((dir) => dir && existsSync(join(dir, 'squirt')));
 }
 
+const SMALL_FILE_LINES = 50;
+const SCRATCHPAD_RE = /(^|\/)claude-[^/]+\/.+\/scratchpad(\/|$)/;
+const BARE_CAT_RE = /^\s*(?:cat|bat)\s+(?!-)(\S+)\s*$/;
+const READ_LIMIT_LINES = 300; // mirrors analyze.ts's read-full-file threshold
+const COUNT_LINES_MAX_BYTES = 2 * 1024 * 1024; // well over 300 lines of any real source file — beyond this, don't load it just to guard against loading it
+
+/** The one local file a Bash command reads whole (cat/head/tail/less/sed …, one path, no
+ *  pipe), resolved against the hook's cwd — or null when the command isn't that shape or
+ *  the file doesn't exist. `lines` is null for a >2MB file (see countLines). */
+function readerTarget(command: string, cwd: string | undefined): { path: string; lines: number | null; scratch: boolean } | null {
+  const raw = bashReadTarget(command);
+  if (!raw) return null;
+  const path = resolve(cwd || process.cwd(), raw.replace(/^~(?=\/)/, homedir()));
+  if (!existsSync(path)) return null;
+  return { path, lines: countLines(path), scratch: SCRATCHPAD_RE.test(path) };
+}
+
 /** PreToolUse(Bash): rewrite the command when the fix is mechanical, block only when it isn't. */
 function runPreBash(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   const command = typeof input.tool_input?.command === 'string' ? input.tool_input.command : '';
@@ -313,7 +341,8 @@ function runPreBash(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
     );
   }
 
-  if (bashLooksLikeLogDump(command)) {
+  const reader = readerTarget(command, input.cwd);
+  if (bashLooksLikeLogDump(command) && !(reader && (reader.scratch || (reader.lines !== null && reader.lines < SMALL_FILE_LINES)))) {
     if (FOLLOW_FLAG_RE.test(command)) {
       return block("tally: -f/--follow streams forever — squirt can't digest an unbounded tail; drop --follow (use --since/--start-time for a bounded window) or run it yourself", env, 'pre-bash');
     }
@@ -330,18 +359,20 @@ function runPreBash(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
     return allow(input, { ...input.tool_input, command: rewritten }, "tally: macOS sed needs -i '' (BSD sed, not GNU)", env, 'pre-bash');
   }
 
+  if (reader && !reader.scratch && BARE_CAT_RE.test(command) && (reader.lines === null || reader.lines > READ_LIMIT_LINES)) {
+    const size = reader.lines === null ? `over ${Math.round(COUNT_LINES_MAX_BYTES / 1024 / 1024)}MB` : `${reader.lines} lines`;
+    return context(input, `tally: ${reader.path} is ${size} — Read with limit/offset or grep first (a bare cat puts the whole file in context)`);
+  }
   return { exit: 0, stdout: '' };
 }
-
-const READ_LIMIT_LINES = 300; // mirrors analyze.ts's read-full-file threshold
-const COUNT_LINES_MAX_BYTES = 2 * 1024 * 1024; // well over 300 lines of any real source file — beyond this, don't load it just to guard against loading it
 
 /** null = "well over the limit", without having read the file — avoids the guard itself
  *  paying the "read a huge file into memory" cost it exists to prevent the model from paying. */
 function countLines(filePath: string): number | null {
   try {
     if (statSync(filePath).size > COUNT_LINES_MAX_BYTES) return null;
-    return readFileSync(filePath, 'utf8').split('\n').length;
+    const s = readFileSync(filePath, 'utf8');
+    return s.split('\n').length - (s.endsWith('\n') ? 1 : 0);
   } catch {
     return 0;
   }
@@ -350,16 +381,20 @@ function countLines(filePath: string): number | null {
 /** PreToolUse(Read): cap an unbounded read of a long file instead of letting it all in. */
 function runPreRead(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   const filePath = typeof input.tool_input?.file_path === 'string' ? input.tool_input.file_path : '';
+  if (!filePath) return { exit: 0, stdout: '' };
+  const unbounded = !input.tool_input?.limit && !input.tool_input?.offset;
+  const repeat = unbounded && input.session_id ? noteFullRead(env, input.session_id, filePath) : false;
+  const again = repeat ? `tally: ${filePath} was already read in full this session — use Grep or Read with offset/limit` : undefined;
   // only `limit` actually bounds the read — an `offset` with no `limit` reads unbounded to EOF,
   // which is exactly what this guard exists to catch, not a reason to skip it
-  if (!filePath || input.tool_input?.limit) return { exit: 0, stdout: '' };
+  if (input.tool_input?.limit) return { exit: 0, stdout: '' };
   const lines = countLines(filePath);
-  if (lines !== null && lines <= READ_LIMIT_LINES) return { exit: 0, stdout: '' };
+  if (lines !== null && lines <= READ_LIMIT_LINES) return again ? context(input, again) : { exit: 0, stdout: '' };
   const linesLabel = lines === null ? `over ${Math.round(COUNT_LINES_MAX_BYTES / 1024 / 1024)}MB` : `${lines} lines`;
   if (env.TALLY_NO_REWRITE === '1') {
     return block(`tally: ${filePath} is ${linesLabel} — use offset/limit instead of a full read`, env, 'pre-read');
   }
-  return allow(input, { ...input.tool_input, limit: READ_LIMIT_LINES }, `tally: ${filePath} is ${linesLabel} — capped to the first ${READ_LIMIT_LINES} lines; pass limit/offset yourself for a different slice`, env, 'pre-read');
+  return allow(input, { ...input.tool_input, limit: READ_LIMIT_LINES }, `tally: ${filePath} is ${linesLabel} — capped to the first ${READ_LIMIT_LINES} lines; pass limit/offset yourself for a different slice`, env, 'pre-read', again);
 }
 
 const SILENT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite']);
@@ -405,6 +440,24 @@ interface Marks {
 
 function marksPath(env: NodeJS.ProcessEnv, sessionId: string): string {
   return join(homeFor(env), 'marks', sessionId);
+}
+
+function readsPath(env: NodeJS.ProcessEnv, sessionId: string): string {
+  return join(homeFor(env), 'reads', sessionId);
+}
+
+/** records an unbounded Read of `filePath` for this session; true when it was already recorded */
+function noteFullRead(env: NodeJS.ProcessEnv, sessionId: string, filePath: string): boolean {
+  try {
+    const path = readsPath(env, sessionId);
+    const seen = existsSync(path) ? readFileSync(path, 'utf8').split('\n') : [];
+    if (seen.includes(filePath)) return true;
+    mkdirSync(join(homeFor(env), 'reads'), { recursive: true });
+    appendFileSync(path, `${filePath}\n`);
+  } catch {
+    // best-effort memory: a write failure must never block or alter the read
+  }
+  return false;
 }
 
 function loadMarks(path: string): Marks | null {
@@ -549,11 +602,12 @@ function mergeInto(settings: Settings): boolean {
   return changed;
 }
 
-// hand-written predecessors of `tally hook pre-bash` — the inline curl|sh one-liner (shape of the
-// real one: `grep -qE '(curl|wget).*\\|.*sh'` … exit 2) and the sed-guard.sh script. `pre-bash` covers
-// both, so `--install` absorbs them (removes them, after a backup). squirt-guard.sh is squirt's — never touched.
+// hand-written predecessors of `tally hook pre-bash` covers all three — the inline curl|sh guard,
+// `sed-guard.sh`, and the retired `squirt-guard.sh` (2026-08-18) — so `--install` absorbs them
+// (removes them, after a backup). Other `squirt …` commands are not guards and stay.
 const LEGACY_CURL_SH_RE = /curl[^\n]*\\?\|[^\n]*\b(sudo\s+)?(ba)?sh\b/;
 const LEGACY_SED_GUARD_RE = /\/hooks\/sed-guard\.sh(\s|$)/;
+const LEGACY_SQUIRT_GUARD_RE = /\/hooks\/squirt-guard\.sh(\s|$)/;
 
 /** removes hand-written PreToolUse(Bash) hooks that `pre-bash` now covers; returns what was
  *  absorbed (origin labels, for the printed `absorbed: …` lines). Only these two shapes — anything
@@ -567,10 +621,10 @@ export function absorbLegacy(settings: Settings, hooksDir: string): string[] {
     g.hooks = g.hooks.filter((h) => {
       const command = typeof h.command === 'string' ? h.command : '';
       const origin = hookOrigin(command, hooksDir);
-      if (origin === 'tally' || origin === 'squirt' || /squirt/.test(command)) return true;
-      const legacy = (origin === 'inline' && LEGACY_CURL_SH_RE.test(command)) || LEGACY_SED_GUARD_RE.test(command);
+      if (origin === 'tally') return true;
+      const legacy = (origin === 'inline' && LEGACY_CURL_SH_RE.test(command)) || LEGACY_SED_GUARD_RE.test(command) || LEGACY_SQUIRT_GUARD_RE.test(command);
       if (!legacy) return true;
-      absorbed.push(origin === 'inline' ? `inline curl|sh guard (${cap(command, 40)})` : origin);
+      absorbed.push(origin === 'inline' ? `inline curl|sh guard (${cap(command, 40)})` : LEGACY_SQUIRT_GUARD_RE.test(command) && origin === 'squirt' ? command : origin);
       return false;
     });
   }
@@ -664,10 +718,9 @@ export interface HooksCmdOpts {
   list?: boolean;
   global?: boolean;
   root?: string; // override for tests — never defaults to a real home dir in a test
-  hooksDir?: string; // override for tests — where squirt-guard.sh/sed-guard.sh live (default ~/.claude/hooks)
+  hooksDir?: string; // override for tests — where sed-guard.sh/squirt-guard.sh live (default ~/.claude/hooks)
   target?: string; // --target <config-dir>: the dir IS the .claude-equivalent — <target>/settings.json, <target>/hooks
   keepLegacy?: boolean; // --keep-legacy: don't absorb the hand-written curl|sh / sed-guard.sh predecessors
-  runSquirtInit?: () => string; // injectable for tests — default spawns `squirt init --claude [--global]`
   now?: Date; // backup-suffix date, injectable for tests
 }
 
@@ -677,21 +730,10 @@ export interface HooksCmdResult {
   message: string;
 }
 
-function defaultSquirtInit(global: boolean | undefined, env: NodeJS.ProcessEnv): string {
-  const args = ['init', '--claude', ...(global ? ['--global'] : [])];
-  try {
-    const out = execFileSync('squirt', args, { env, cwd: process.cwd(), timeout: 15_000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    return `squirt init: ${out.trim().split('\n').pop() || 'ok'}`;
-  } catch (e) {
-    return `squirt init --claude${global ? ' --global' : ''} failed: ${(e as Error).message.split('\n')[0]} — run it yourself`;
-  }
-}
-
 /** `tally hooks --install [--global] [--keep-legacy] | --print | --list`. Targets `<root>/.claude/settings.json`,
  *  root = cwd, or `~` with --global. `--print`/`--list` never write. `--install` is the single owner:
- *  it wires tally's 7 entries, absorbs the hand-written curl|sh / sed-guard.sh predecessors `pre-bash`
- *  covers (backup first), delegates the squirt guard to `squirt init --claude` when squirt's on PATH
- *  and no squirt hook is wired yet, and writes nothing when the result is byte-identical. */
+ *  it wires tally's 7 entries, absorbs the hand-written curl|sh / sed-guard.sh / squirt-guard.sh predecessors
+ *  `pre-bash` covers (backup first), and writes nothing when the result is byte-identical. */
 export async function cmdHooks(opts: HooksCmdOpts, env: NodeJS.ProcessEnv = process.env): Promise<HooksCmdResult> {
   const root = opts.root ?? (opts.global ? homedir() : process.cwd());
   const settingsPath = opts.target ? join(opts.target, 'settings.json') : join(root, '.claude', 'settings.json');
@@ -727,11 +769,6 @@ export async function cmdHooks(opts: HooksCmdOpts, env: NodeJS.ProcessEnv = proc
       writeFileSync(settingsPath, text);
       for (const a of absorbed) notes.push(`absorbed: ${a}`);
       if (wired) notes.push(`wired ${HOOK_WIRING.length} hooks into ${settingsPath}`);
-    }
-    if (squirtOnPath(env)) {
-      const hasSquirt = /squirt-guard|squirt init|squirt hook/.test(text);
-      if (hasSquirt) notes.push('squirt guard managed by squirt init — left alone');
-      else notes.push((opts.runSquirtInit ?? (() => defaultSquirtInit(opts.global, env)))());
     }
     return { exit: 0, stdout: '', message: notes.join('\n') };
   }

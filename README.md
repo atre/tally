@@ -90,7 +90,8 @@ long-context always renders first: `>150k@turn` tells you where the session
 should have been compacted or split, and "burned above 150k" is what those
 extra turns re-read every request. `compact-loop` renders right after it — a
 different shape of the same problem: ≥3 compactions in one session means
-`autoCompactWindow` keeps rebuilding context just to re-compact it. The tool
+`autoCompactWindow` keeps rebuilding context just to re-compact it; `marathon`
+(>500 turns, never compacted) comes third. The tool
 buckets below are the habits that fatten context; each call lands in exactly
 one bucket, biggest first.
 
@@ -162,9 +163,9 @@ It is the single owner of the guard hooks: it also **absorbs** the hand-written
 predecessors `pre-bash` now covers — the inline `curl|sh` one-liner and
 `~/.claude/hooks/sed-guard.sh` — printing `absorbed: <origin>` per entry, after
 writing `settings.json.bak-tally-install-<YYYYMMDD>` (`--keep-legacy` skips
-this); and when `squirt` is on PATH and no squirt hook is wired yet it runs
-`squirt init --claude [--global]` for you (squirt-guard.sh stays squirt's —
-never touched). Idempotent — a second run writes nothing (a hand-formatted
+this). A leftover `~/.claude/hooks/squirt-guard.sh` (retired 2026-08-18 —
+`pre-bash` does that job) is absorbed like `sed-guard.sh`; pass `--keep-legacy`
+to keep hand-written hooks. Idempotent — a second run writes nothing (a hand-formatted
 file stays byte-identical, no backup) — and leaves every other hook alone.
 `tally hooks --print` shows what would be written without touching anything.
 `tally hooks --list [--global]` flattens every hook currently in

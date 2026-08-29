@@ -1,7 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { estTokens, isWithinDir, usedTools } from './parse.js';
-import type { ToolCall } from './types.js';
+import type { HookRun, ToolCall } from './types.js';
 
 export interface SkillRow {
   skill: string;
@@ -128,4 +128,39 @@ export function toolsReport(calls: ToolCall[], tools: string[] = DEFAULT_TOOLS, 
   return [...byKey.values()]
     .map((r) => ({ tool: r.tool, month: r.month, calls: r.calls, projects: r.projects.size, flag: r.calls < 5 }))
     .sort((a, b) => a.tool.localeCompare(b.tool) || a.month.localeCompare(b.month));
+}
+
+export interface HookRunRow {
+  tool: string;
+  hook: string; // hook event, e.g. "SessionStart", "Stop", "PreToolUse"
+  month: string; // UTC YYYY-MM
+  runs: number;
+  projects: number;
+}
+
+/** Hook-fired runs per personal CLI × hook event × month — the half of adoption `toolsReport`
+ *  can't see: pulse/brief on SessionStart and snuff on Stop run as hooks, never as Bash calls.
+ *  Attribution is the same command-position `usedTools` tokenizer over the recorded
+ *  `attachment.command`, with the same own-repo skip. Counts are a floor: records without a
+ *  `command` field (older harness versions) can't be attributed at all. */
+export function hookRunsReport(runs: HookRun[], tools: string[] = DEFAULT_TOOLS, gitHome = process.env.TALLY_GIT || join(homedir(), 'git')): HookRunRow[] {
+  const byKey = new Map<string, { tool: string; hook: string; month: string; runs: number; projects: Set<string> }>();
+  for (const r of runs) {
+    for (const tool of usedTools(r.command, tools)) {
+      const ownRepo = r.cwd ? isWithinDir(r.cwd, join(gitHome, tool)) : r.project === `git/${tool}`;
+      if (ownRepo) continue;
+      const month = new Date(r.timestamp).toISOString().slice(0, 7);
+      const key = `${tool}|${r.hook}|${month}`;
+      let row = byKey.get(key);
+      if (!row) {
+        row = { tool, hook: r.hook, month, runs: 0, projects: new Set() };
+        byKey.set(key, row);
+      }
+      row.runs++;
+      row.projects.add(r.project);
+    }
+  }
+  return [...byKey.values()]
+    .map((r) => ({ tool: r.tool, hook: r.hook, month: r.month, runs: r.runs, projects: r.projects.size }))
+    .sort((a, b) => a.tool.localeCompare(b.tool) || a.month.localeCompare(b.month) || b.runs - a.runs);
 }

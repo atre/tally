@@ -334,6 +334,7 @@ export function analyze(scan: Scan, since: number, until: number, top = 5, ctxLi
         burnedAbove: st.burned,
         ctxSeries: s.ctx.map((c) => c.cacheRead),
         ...(s.firstPrompt ? { firstPrompt: s.firstPrompt } : {}),
+        ...(s.partial ? { partial: true } : {}),
       };
     })
     .sort((a, b) => b.cacheRead - a.cacheRead);
@@ -363,6 +364,24 @@ export function analyze(scan: Scan, since: number, until: number, top = 5, ctxLi
       tokens: rows.reduce((n, r) => n + r.tokens, 0),
       hint: 'SessionStart/hook printers add up on top of the digest itself — keep each one to a budget',
       samples: rows.slice(0, top).map((r) => `${r.hook} ×${r.count} ~${fmt(r.tokens)} tok`),
+    });
+  }
+
+  // marathon: >500 turns and never compacted — past this length the turn count alone predicts
+  // the bill. Unshifted before compact-loop and long-context so it lands third: long-context,
+  // compact-loop, marathon, then the tool buckets.
+  const MARATHON_TURNS = 500;
+  const marathons = [...scan.sessions.values()]
+    .filter((s) => s.turns > MARATHON_TURNS && compactionEvents(s).length === 0)
+    .sort((a, b) => b.usage.cacheRead - a.usage.cacheRead);
+  if (marathons.length) {
+    findings.unshift({
+      key: 'marathon',
+      title: `Marathon sessions (>${MARATHON_TURNS} turns, never compacted)`,
+      count: marathons.length,
+      tokens: marathons.reduce((n, s) => n + s.usage.cacheRead, 0),
+      hint: 'past this length turn count alone predicts the bill — split the task across sessions (or /compact at a milestone)',
+      samples: marathons.slice(0, top).map((s) => `${s.id.slice(0, 8)} ${s.project}: ${s.turns} turns, ctx ~${fmt(stats.get(s.id)!.avg)}/turn, read ${fmt(s.usage.cacheRead)}`),
     });
   }
 

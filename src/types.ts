@@ -48,6 +48,7 @@ export interface Session {
    * turns stay in `usage`/`turns` totals but would fake dips in the curve */
   ctx: { ts: number; cacheRead: number }[];
   firstPrompt?: string;
+  partial?: boolean; // started before the --since window — its numbers are a slice of the session, not the session
 }
 
 /** a `type: "attachment"` / `attachment.type: "hook_success"` record — a hook's stdout/JSON
@@ -64,10 +65,26 @@ export interface HookOutput {
   isSidechain: boolean;
 }
 
+/** a hook_success record's *process run* — recorded whenever the harness kept
+ *  `attachment.command` (≥ ~2.1), regardless of whether any output entered context: a green
+ *  radar prints one line, a passing Stop gate may print nothing, but the run happened either
+ *  way. Older transcripts lack `command`, so any count built on this is a floor. */
+export interface HookRun {
+  id: string; // record uuid — same dedup convention as HookOutput
+  sessionId: string;
+  project: string;
+  cwd?: string;
+  hook: string; // attachment.hookEvent, e.g. "SessionStart", "Stop", "PreToolUse"
+  command: string;
+  timestamp: number;
+  isSidechain: boolean;
+}
+
 export interface Scan {
   turns: Turn[];
   calls: ToolCall[];
   hookOutputs: HookOutput[];
+  hookRuns: HookRun[];
   sessions: Map<string, Session>;
   files: number;
   bytes: number;
@@ -121,6 +138,7 @@ export interface SessionRow {
   /** cache-read per turn in order; rendered only in --json */
   ctxSeries: number[];
   firstPrompt?: string;
+  partial?: boolean;
 }
 
 export interface DayRow {

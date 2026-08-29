@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scan } from '../src/scan.js';
+import { scan, defaultProjectsDir } from '../src/scan.js';
 import { analyze, bashLooksLikeLogDump, suggestGuards } from '../src/analyze.js';
 import { parseArgs, parseSince, parseTokenCount, effectiveSince } from '../src/cli.js';
 import { projectLabel, inputKey, parseTranscript, TranscriptParser, usedTools } from '../src/parse.js';
@@ -17,7 +17,7 @@ import { saveSnap, loadSnap } from '../src/snap.js';
 import { diffReports, renderDiff } from '../src/diff.js';
 import { mapPoolpoolRows } from '../src/poolpool.js';
 import { runHook, mergeHooks, cmdHooks, listHooks, renderHooksList, findDuplicateHooks } from '../src/hooks.js';
-import { parseGuardLog, skillsReport, toolsReport } from '../src/tools.js';
+import { parseGuardLog, skillsReport, toolsReport, hookRunsReport } from '../src/tools.js';
 import { bashReadTarget, fatFiles, readTarget, residentTurns } from '../src/files.js';
 import type { ToolCall as ToolCallT } from '../src/types.js';
 
@@ -599,37 +599,33 @@ test('cmdHooks: --print never writes, --install is idempotent, both scoped to ro
   assert.match(printed.stdout, /tally hook pre-bash/);
   await assert.rejects(readFile(join(tmp, '.claude', 'settings.json'), 'utf8'), '--print must not create .claude/');
 
-  let squirtRuns = 0;
-  const env = { PATH: join(tmp, 'bin') }; // fake squirt on PATH — the injected runner must be used, never a real spawn
+  const env = { PATH: join(tmp, 'bin') }; // fake squirt on PATH — must make no difference any more
   await mkdir(join(tmp, 'bin'));
   await writeFile(join(tmp, 'bin', 'squirt'), '');
-  const runSquirtInit = () => { squirtRuns++; return 'squirt init: ok'; };
-  const installed = await cmdHooks({ install: true, root: tmp, runSquirtInit }, env);
+  const installed = await cmdHooks({ install: true, root: tmp }, env);
   assert.equal(installed.exit, 0);
   assert.match(installed.message, /wired \d+ hooks into/);
-  assert.equal(squirtRuns, 1, 'fresh HOME → squirt init delegated exactly once');
-  assert.match(installed.message, /squirt init: ok/);
   const written = JSON.parse(await readFile(join(tmp, '.claude', 'settings.json'), 'utf8'));
   assert.equal(written.hooks.PreToolUse.length, 3);
   assert.equal((await readdir(join(tmp, '.claude'))).some((f) => f.startsWith('settings.json.bak')), false, 'no backup when there was no file to back up');
 
-  const again = await cmdHooks({ install: true, root: tmp, runSquirtInit }, env);
+  const again = await cmdHooks({ install: true, root: tmp }, env);
   assert.match(again.message, /already has tally's hooks/);
-  assert.equal(squirtRuns, 2, 'still no squirt hook wired (runner is a stub) → asked again');
 
-  // an existing squirt-guard hook → squirt is left alone, runner NOT called
+  // an existing squirt-guard hook → absorbed like sed-guard.sh, squirt init never consulted
   const withSquirt = JSON.parse(await readFile(join(tmp, '.claude', 'settings.json'), 'utf8'));
   withSquirt.hooks.PreToolUse[0].hooks.unshift({ type: 'command', command: '~/.claude/hooks/squirt-guard.sh' });
   await writeFile(join(tmp, '.claude', 'settings.json'), JSON.stringify(withSquirt));
-  const third = await cmdHooks({ install: true, root: tmp, runSquirtInit }, env);
-  assert.equal(squirtRuns, 2, 'squirt-guard already wired → runner not called');
-  assert.match(third.message, /squirt guard managed by squirt init — left alone/);
+  const third = await cmdHooks({ install: true, root: tmp }, env);
+  assert.match(third.message, /absorbed: .*squirt-guard\.sh/);
+  const reread = JSON.parse(await readFile(join(tmp, '.claude', 'settings.json'), 'utf8'));
+  assert.equal(JSON.stringify(reread).includes('squirt-guard'), false, 'absorbed');
   // without squirt on PATH: no squirt note at all
-  const noSquirt = await cmdHooks({ install: true, root: tmp, runSquirtInit }, { PATH: '/nonexistent' });
-  assert.doesNotMatch(noSquirt.message, /squirt/);
+  const noSquirt = await cmdHooks({ install: true, root: tmp }, { PATH: '/nonexistent' });
+  assert.doesNotMatch(noSquirt.message, /squirt init|managed by squirt/);
 });
 
-test('cmdHooks --install: absorbs the hand-written curl|sh + sed-guard.sh hooks pre-bash covers, keeps squirt-guard + everything else, backs up, second run no-op', async () => {
+test('cmdHooks --install: absorbs the hand-written curl|sh + sed-guard.sh + squirt-guard.sh hooks pre-bash covers, keeps everything else, backs up, second run no-op', async () => {
   const tmp = await mkdtemp(join(tmpdir(), 'tally-hooksabsorb-'));
   await mkdir(join(tmp, '.claude'), { recursive: true });
   const sample = await readFile(join(FIX, 'settings.sample.json'), 'utf8');
@@ -640,12 +636,13 @@ test('cmdHooks --install: absorbs the hand-written curl|sh + sed-guard.sh hooks 
   assert.equal(r.exit, 0);
   assert.match(r.message, /absorbed: inline curl\|sh guard/);
   assert.match(r.message, /absorbed: .*sed-guard\.sh/);
+  assert.match(r.message, /absorbed: .*squirt-guard\.sh/);
   const text = await readFile(join(tmp, '.claude', 'settings.json'), 'utf8');
   const written = JSON.parse(text);
   const cmds = written.hooks.PreToolUse.flatMap((g: any) => g.hooks.map((h: any) => h.command));
   assert.equal(cmds.some((c: string) => /curl/.test(c) && !/tally hook/.test(c)), false, 'inline curl|sh guard gone');
   assert.equal(cmds.some((c: string) => /sed-guard\.sh/.test(c)), false, 'sed-guard.sh gone');
-  assert.ok(cmds.includes('~/.claude/hooks/squirt-guard.sh'), 'squirt-guard kept');
+  assert.equal(cmds.some((c: string) => /squirt-guard\.sh/.test(c)), false, 'squirt-guard.sh absorbed');
   assert.equal(cmds.filter((c: string) => /tally hook/.test(c)).length, 3, 'pre-bash, pre-read, ctx-guard under PreToolUse');
   assert.equal(listHooks(text, join(tmp, '.claude', 'hooks')).filter((h) => h.origin === 'tally').length, 7, 'tally 7 present');
   const original = JSON.parse(sample);
@@ -779,6 +776,59 @@ test('toolsReport: excludes calls from the tool\'s own repo, flags < 5/month', (
     [{ tool: 'squirt', month: '2026-08', calls: 1, projects: 1, flag: true }],
     'call c excluded (inside squirt/src), call d counted (unrelated repo)',
   );
+});
+
+test('defaultProjectsDir: env override widens the union of instances, never replaces it', () => {
+  const exists = (p: string) => p.includes('.claude'); // both instance dirs "exist"
+  // the 2026-08-28 bug: CLAUDE_CONFIG_DIR=~/.claude-dev collapsed the scan to dev-only
+  assert.equal(
+    defaultProjectsDir({ CLAUDE_CONFIG_DIR: '/h/.claude-dev' }, '/h', exists),
+    '/h/.claude-dev/projects,/h/.claude/projects',
+  );
+  // no env: both instances, deduped, main first
+  assert.equal(defaultProjectsDir({}, '/h', exists), '/h/.claude/projects,/h/.claude-dev/projects');
+  // CLAUDE_CONFIG_DIR pointing at the main instance dedupes, not doubles
+  assert.equal(
+    defaultProjectsDir({ CLAUDE_CONFIG_DIR: '/h/.claude' }, '/h', exists),
+    '/h/.claude/projects,/h/.claude-dev/projects',
+  );
+  // TALLY_PROJECTS still wins outright
+  assert.equal(defaultProjectsDir({ TALLY_PROJECTS: '/x', CLAUDE_CONFIG_DIR: '/h/.claude-dev' }, '/h', exists), '/x');
+  // nothing exists → fall back to the main instance path so the "no transcripts" error names a real place
+  assert.equal(defaultProjectsDir({}, '/h', () => false), '/h/.claude/projects');
+});
+
+test('hookRunsReport: attributes hook-fired runs by command position, skips own repo', () => {
+  const base = { id: 'x', sessionId: 's', isSidechain: false };
+  const runs = [
+    // pulse SessionStart from hub — counted (this is the adoption toolsReport can't see)
+    { ...base, id: 'a', project: 'git/hub', cwd: '/Users/x/git/hub', hook: 'SessionStart', command: 'pulse --brief; exit 0', timestamp: Date.parse('2026-08-15T10:00:00Z') },
+    { ...base, id: 'b', project: 'git/hub', cwd: '/Users/x/git/hub', hook: 'SessionStart', command: 'pulse --brief; exit 0', timestamp: Date.parse('2026-08-16T10:00:00Z') },
+    // snuff Stop inside snuff's own repo — skipped, same rule as toolsReport
+    { ...base, id: 'c', project: 'git/snuff', cwd: '/Users/x/git/snuff', hook: 'Stop', command: 'snuff --hook', timestamp: Date.parse('2026-08-15T10:00:00Z') },
+    // `command -v tally` guard prefix is an ARG, not an invocation — only the second segment counts
+    { ...base, id: 'd', project: 'git/demo', cwd: '/Users/x/git/demo', hook: 'Stop', command: 'command -v tally >/dev/null 2>&1 || exit 0; tally hook stop-feedback', timestamp: Date.parse('2026-08-15T10:00:00Z') },
+  ];
+  assert.deepEqual(hookRunsReport(runs, ['pulse', 'snuff', 'tally'], '/Users/x/git'), [
+    { tool: 'pulse', hook: 'SessionStart', month: '2026-08', runs: 2, projects: 1 },
+    { tool: 'tally', hook: 'Stop', month: '2026-08', runs: 1, projects: 1 },
+  ]);
+});
+
+test('parser: hook_success with a command records a hookRun even when no output entered context', () => {
+  const p = new TranscriptParser('-Users-x-git-demo');
+  const rec = (uuid: string, content: string, command?: string) =>
+    JSON.stringify({
+      type: 'attachment', uuid, timestamp: '2026-08-15T10:00:00Z', sessionId: 's1', cwd: '/Users/x/git/demo',
+      attachment: { type: 'hook_success', hookEvent: 'Stop', content, command },
+    });
+  p.push(rec('u1', '', 'snuff --hook')); // green gate: no context injected, but it RAN
+  p.push(rec('u2', 'snuff ✗ red', 'snuff --hook')); // red gate: both
+  p.push(rec('u3', 'legacy record without command')); // old harness: output only
+  assert.equal(p.hookRuns.length, 2);
+  assert.equal(p.hookOutputs.length, 2);
+  assert.deepEqual(p.hookRuns.map((r) => r.id), ['u1', 'u2']);
+  assert.equal(p.hookRuns[0].command, 'snuff --hook');
 });
 
 test('renderBrief: ≤ 12 lines, heaviest + top leaks, --brief CLI wiring', async () => {
