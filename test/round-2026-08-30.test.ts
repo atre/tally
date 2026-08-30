@@ -180,3 +180,15 @@ test('item 7: hooks --install owns the log guard — a wired squirt-guard.sh is 
   const keptCmds: string[] = JSON.parse(await readFile(join(kept, '.claude', 'settings.json'), 'utf8')).hooks.PreToolUse.flatMap((g: { hooks: { command: string }[] }) => g.hooks.map((h) => h.command));
   assert.ok(keptCmds.includes('~/.claude/hooks/squirt-guard.sh'), '--keep-legacy leaves it, like sed-guard.sh');
 });
+
+test('item 2b (2026-08-30 aigen S8): pre-bash never wraps a markdown file — tables/prose dedupe into an unreadable digest', async () => {
+  const env = await guardEnv();
+  const dir = await mkdtemp(join(tmpdir(), 'tally-readmd-'));
+  const state = join(dir, 'STATE.md');
+  await writeFile(state, lines(400));
+  const r1 = runHook('pre-bash', { tool_input: { command: `tail -100 ${state}` } }, env);
+  assert.equal(r1.exit, 0);
+  assert.equal(r1.stdout, '', '400-line .md: no rewrite, nothing to say');
+  const r2 = runHook('pre-bash', { tool_input: { command: `cat ${join(dir, 'NOTES.markdown')}` } }, env);
+  assert.equal(r2.stdout, '', 'missing .markdown target: no reader → falls through to the plain-cat path, still no wrap');
+});

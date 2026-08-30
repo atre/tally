@@ -2,7 +2,10 @@
 gates:
   - name: lint
     run: npm run lint
+    paths: ["src/**", "test/**", "package.json", "tsconfig*.json", "eslint.config.*", ".eslintrc*"]
   - name: test
     run: npm test
+    paths: ["src/**", "test/**", "package.json", "tsconfig*.json"]
   - name: build
     run: npm run build
+    paths: ["src/**", "package.json", "tsconfig*.json"]

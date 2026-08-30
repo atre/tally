@@ -1,10 +1,10 @@
-import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, closeSync, existsSync, fstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { BIG_RESULT_CHARS, DEFAULT_CTX_LIMIT, bashLooksLikeLogDump, stripForCurlShCheck, stripNonCodeSpans } from './analyze.js';
 import { bashReadTarget } from './files.js';
 import { cap, fmt, pad } from './render.js';
-import { escapeRegExp, estTokens, isWithinDir, usedToolsCertain } from './parse.js';
+import { escapeRegExp, estTokens, isWithinDir, usedToolStatementsCertain } from './parse.js';
 
 export interface HookResult {
   exit: number;
@@ -301,6 +301,7 @@ function squirtOnPath(env: NodeJS.ProcessEnv): boolean {
 
 const SMALL_FILE_LINES = 50;
 const SCRATCHPAD_RE = /(^|\/)claude-[^/]+\/.+\/scratchpad(\/|$)/;
+const MARKDOWN_RE = /\.(md|markdown)$/i; // prose/tables — squirt's dedupe makes them unreadable, never auto-wrap
 const BARE_CAT_RE = /^\s*(?:cat|bat)\s+(?!-)(\S+)\s*$/;
 const READ_LIMIT_LINES = 300; // mirrors analyze.ts's read-full-file threshold
 const COUNT_LINES_MAX_BYTES = 2 * 1024 * 1024; // well over 300 lines of any real source file — beyond this, don't load it just to guard against loading it
@@ -308,12 +309,12 @@ const COUNT_LINES_MAX_BYTES = 2 * 1024 * 1024; // well over 300 lines of any rea
 /** The one local file a Bash command reads whole (cat/head/tail/less/sed …, one path, no
  *  pipe), resolved against the hook's cwd — or null when the command isn't that shape or
  *  the file doesn't exist. `lines` is null for a >2MB file (see countLines). */
-function readerTarget(command: string, cwd: string | undefined): { path: string; lines: number | null; scratch: boolean } | null {
+function readerTarget(command: string, cwd: string | undefined): { path: string; lines: number | null; scratch: boolean; markdown: boolean } | null {
   const raw = bashReadTarget(command);
   if (!raw) return null;
   const path = resolve(cwd || process.cwd(), raw.replace(/^~(?=\/)/, homedir()));
   if (!existsSync(path)) return null;
-  return { path, lines: countLines(path), scratch: SCRATCHPAD_RE.test(path) };
+  return { path, lines: countLines(path), scratch: SCRATCHPAD_RE.test(path), markdown: MARKDOWN_RE.test(path) };
 }
 
 /** PreToolUse(Bash): rewrite the command when the fix is mechanical, block only when it isn't. */
@@ -344,12 +345,21 @@ function runPreBash(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   }
 
   const reader = readerTarget(command, input.cwd);
-  if (bashLooksLikeLogDump(command) && !(reader && (reader.scratch || (reader.lines !== null && reader.lines < SMALL_FILE_LINES)))) {
+  if (bashLooksLikeLogDump(command) && !(reader && (reader.scratch || reader.markdown || (reader.lines !== null && reader.lines < SMALL_FILE_LINES)))) {
     if (FOLLOW_FLAG_RE.test(command)) {
       return block("tally: -f/--follow streams forever — squirt can't digest an unbounded tail; drop --follow (use --since/--start-time for a bounded window) or run it yourself", env, 'pre-bash');
     }
     if (!noRewrite && squirtOnPath(env) && !/[|><]/.test(command)) {
-      return allow(input, { ...input.tool_input, command: `${command} | squirt` }, 'tally: piped through squirt to keep the raw dump out of context', env, 'pre-bash');
+      const rewritten = `${command} | squirt`;
+      if (input.session_id) {
+        try {
+          mkdirSync(join(homeFor(env), 'rewrites'), { recursive: true });
+          writeFileSync(rewritesPath(env, input.session_id), JSON.stringify({ original: command, rewritten }));
+        } catch {
+          // best-effort — a state-write failure must never affect the rewrite
+        }
+      }
+      return allow(input, { ...input.tool_input, command: rewritten }, 'tally: piped through squirt to keep the raw dump out of context', env, 'pre-bash');
     }
     return block('tally: looks like a raw log dump — pipe through squirt (or head/tail/grep/wc)', env, 'pre-bash');
   }
@@ -400,18 +410,42 @@ function runPreRead(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
 }
 
 const SILENT_TOOLS = new Set(['Edit', 'Write', 'MultiEdit', 'NotebookEdit', 'TodoWrite']);
-const LOOP_RE = /\bfor\s+\S+\s+in\b[\s\S]*?\bdo\b|\bwhile\b[\s\S]*?\bdo\b/;
+
+function resultsPath(env: NodeJS.ProcessEnv, sessionId: string): string {
+  return join(homeFor(env), 'results', sessionId);
+}
+
+/** records a big (> BIG_RESULT_CHARS) result for `key` in this session; true when it was already recorded */
+function noteBigResult(env: NodeJS.ProcessEnv, sessionId: string, key: string): boolean {
+  try {
+    const path = resultsPath(env, sessionId);
+    const seen = existsSync(path) ? readFileSync(path, 'utf8').split('\n') : [];
+    if (seen.includes(key)) return true;
+    mkdirSync(join(homeFor(env), 'results'), { recursive: true });
+    appendFileSync(path, `${key}\n`);
+  } catch {
+    // best-effort memory: a write failure must never block or alter the tool call
+  }
+  return false;
+}
 
 /** PostToolUse (any tool): a nudge, never a block — the tool already ran. */
-function runPostTool(input: HookInput): HookResult {
+function runPostTool(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   if (input.tool_name && SILENT_TOOLS.has(input.tool_name)) return { exit: 0, stdout: '' }; // the harness echoes these diffs back regardless — nothing to trim
   const r = input.tool_response;
   const isImage = r != null && typeof r === 'object' && ((r as { type?: string }).type === 'image' || (r as { isImage?: boolean }).isImage === true);
   if (isImage) return { exit: 0, stdout: '' }; // never size/estimate base64 image payloads — the number is both huge and useless (nothing to trim)
   const size = JSON.stringify(input.tool_response ?? '').length;
-  let threshold = BIG_RESULT_CHARS;
-  if (input.tool_name === 'Bash' && LOOP_RE.test(String(input.tool_input?.command ?? ''))) threshold = 4 * BIG_RESULT_CHARS; // an explicit shell loop is already the trimmed shape
-  if (size <= threshold) return { exit: 0, stdout: '' };
+  if (size <= BIG_RESULT_CHARS) return { exit: 0, stdout: '' };
+  if (input.tool_name !== 'WebFetch') {
+    const key = input.tool_name === 'Read'
+      ? `Read:${String(input.tool_input?.file_path ?? '')}`
+      : input.tool_name === 'Bash'
+        ? `Bash:${String(input.tool_input?.command ?? '').replace(/\s+/g, ' ').trim()}`
+        : `${input.tool_name}:${JSON.stringify(input.tool_input ?? {})}`;
+    const repeat = input.session_id ? noteBigResult(env, input.session_id, key) : false;
+    if (size <= 4 * BIG_RESULT_CHARS && !repeat) return { exit: 0, stdout: '' };
+  }
   const tok = fmt(estTokens(size));
   const additionalContext = input.tool_name === 'WebFetch'
     ? `tally: last result ~${tok} tok — that's the remote page's size; if you need it again, grep the saved tool-output file instead of re-fetching`
@@ -448,6 +482,10 @@ function readsPath(env: NodeJS.ProcessEnv, sessionId: string): string {
   return join(homeFor(env), 'reads', sessionId);
 }
 
+function rewritesPath(env: NodeJS.ProcessEnv, sessionId: string): string {
+  return join(homeFor(env), 'rewrites', sessionId);
+}
+
 /** records an unbounded Read of `filePath` for this session; true when it was already recorded */
 function noteFullRead(env: NodeJS.ProcessEnv, sessionId: string, filePath: string): boolean {
   try {
@@ -479,21 +517,36 @@ function runPostBashMark(input: HookInput, env: NodeJS.ProcessEnv): HookResult {
   // stop-feedback nag the human's session for a worker's probe (2026-08-30: a fork ran `squirt init --help`,
   // the hub session got blocked for squirt). Only the main thread's own invocations count as dogfooding.
   if (input.agent_id) return { exit: 0, stdout: '' };
+  // a `| squirt` that pre-bash itself injected is tally's own doing, not the model's dogfooding —
+  // match against the pre-rewrite command instead, and consume the record so a later, genuinely
+  // model-written command with the identical string isn't silently un-marked too.
+  let effective = command;
+  try {
+    const p = rewritesPath(env, input.session_id);
+    const rec = JSON.parse(readFileSync(p, 'utf8')) as { original: string; rewritten: string };
+    if (rec.rewritten === command) {
+      effective = rec.original;
+      unlinkSync(p);
+    }
+  } catch {
+    // no record, or unreadable — treat the command as the model's own
+  }
   const home = gitHome(env);
-  // command-position match only (parse.ts usedToolsCertain), and only segments that CERTAINLY ran
-  // given the overall exit was 0 (PostToolUse(Bash) never fires otherwise) — `pulse --brief` /
-  // `cd ~/git/brief` are not usage, and a non-final `&&` chain may have been short-circuited.
-  const matched = usedToolsCertain(command, feedbackTools(env)).filter(
-    (tool) => !(input.cwd && isWithinDir(input.cwd, join(home, tool))), // used from inside its own repo (or a subdirectory of it) — not the dogfood signal this tracks
+  // command-position match only (parse.ts usedToolStatementsCertain), and only segments that
+  // CERTAINLY ran given the overall exit was 0 (PostToolUse(Bash) never fires otherwise) —
+  // `pulse --brief` / `cd ~/git/brief` are not usage, and a non-final `&&` chain may have been
+  // short-circuited.
+  const hits = usedToolStatementsCertain(effective, feedbackTools(env)).filter(
+    (h) => !(input.cwd && isWithinDir(input.cwd, join(home, h.tool))), // used from inside its own repo (or a subdirectory of it) — not the dogfood signal this tracks
   );
-  if (!matched.length) return { exit: 0, stdout: '' };
+  if (!hits.length) return { exit: 0, stdout: '' };
   const path = marksPath(env, input.session_id);
   const marks = loadMarks(path) ?? { ts: Date.now(), tools: [] };
   let changed = false;
-  for (const t of matched) {
-    if (!marks.tools.includes(t)) {
-      marks.tools.push(t);
-      marks.via = { ...(marks.via ?? {}), [t]: command.replace(/\s+/g, ' ').trim().slice(0, 60) };
+  for (const h of hits) {
+    if (!marks.tools.includes(h.tool)) {
+      marks.tools.push(h.tool);
+      marks.via = { ...(marks.via ?? {}), [h.tool]: h.statement.slice(0, 60) };
       changed = true;
     }
   }
@@ -536,7 +589,7 @@ export function runHook(name: string, input: HookInput, env: NodeJS.ProcessEnv =
   if (name === 'ctx-guard') return runCtxGuard(input, env);
   if (name === 'pre-bash') return runPreBash(input, env);
   if (name === 'pre-read') return runPreRead(input, env);
-  if (name === 'post-tool') return runPostTool(input);
+  if (name === 'post-tool') return runPostTool(input, env);
   if (name === 'post-bash-mark') return runPostBashMark(input, env);
   if (name === 'stop-feedback') return runStopFeedback(input, env);
   // exit 0 either way — a hook must never block on its own misconfiguration — but a stderr

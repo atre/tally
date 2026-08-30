@@ -44,17 +44,21 @@ export interface ShellSegment {
  *  tool name in command position — a false positive, not real usage. Each segment's `sep` is the
  *  separator that ENDED the previous segment (i.e. that precedes this one); heredoc bodies are
  *  skipped entirely — they're data, not commands, and splitting them on `\n` is a false positive. */
-export function shellSegments(command: string): ShellSegment[] {
-  const segments: ShellSegment[] = [];
+function segmentsWithOffsets(command: string): (ShellSegment & { start: number; end: number })[] {
+  const segments: (ShellSegment & { start: number; end: number })[] = [];
   let cur = '';
   let quote: '"' | "'" | null = null;
   let pendingSep: ShellSegment['sep'] = null;
+  let segStart = 0;
   const push = (sep: ShellSegment['sep']) => {
-    segments.push({ text: cur, sep: pendingSep });
+    segments.push({ text: cur, sep: pendingSep, start: segStart, end: i });
     cur = '';
     pendingSep = sep;
+    segStart = -1;
   };
-  for (let i = 0; i < command.length; i++) {
+  let i: number;
+  for (i = 0; i < command.length; i++) {
+    if (segStart < 0) segStart = i;
     const ch = command[i];
     // Backslash escapes the next char (bash honors this inside double quotes and unquoted;
     // single quotes take backslash literally, so skip this branch there) — without it, `\"`
@@ -112,8 +116,12 @@ export function shellSegments(command: string): ShellSegment[] {
     }
     cur += ch;
   }
-  segments.push({ text: cur, sep: pendingSep });
+  segments.push({ text: cur, sep: pendingSep, start: segStart < 0 ? command.length : segStart, end: command.length });
   return segments.filter((s) => s.text.trim() !== '');
+}
+
+export function shellSegments(command: string): ShellSegment[] {
+  return segmentsWithOffsets(command).map(({ text, sep }) => ({ text, sep }));
 }
 
 /** strips env assignments / wrapper commands / npx down to the invoked head, and pushes any
@@ -150,9 +158,10 @@ export function usedTools(command: string, tools: readonly string[]): string[] {
  *  later statement that itself succeeded; `||` is ambiguous in both positions — it only runs on a
  *  failure path, or not at all. `|`, `(`, `$(`, `` ` `` neither set nor reset the chain state —
  *  their segments inherit whatever statement they're nested in. */
-export function usedToolsCertain(command: string, tools: readonly string[]): string[] {
+export function usedToolStatementsCertain(command: string, tools: readonly string[]): { tool: string; statement: string }[] {
+  const result: { tool: string; statement: string }[] = [];
   const used: string[] = [];
-  const segments = shellSegments(command);
+  const segments = segmentsWithOffsets(command);
   const n = segments.length;
   const finalStatement: boolean[] = new Array(n);
   let sawBoundaryTail = false;
@@ -160,6 +169,18 @@ export function usedToolsCertain(command: string, tools: readonly string[]): str
     finalStatement[i] = !sawBoundaryTail;
     if (segments[i].sep === ';' || segments[i].sep === '\n') sawBoundaryTail = true;
   }
+  // a "statement" is a run of segments joined by anything but `;`/`\n` — those two are the real
+  // top-level boundaries; `&&`/`||`/`|`/`(`/`$(`/backtick all keep segments inside the same statement.
+  const stmtStart = (i: number): number => {
+    let k = i;
+    while (k > 0 && segments[k].sep !== ';' && segments[k].sep !== '\n') k--;
+    return segments[k].start;
+  };
+  const stmtEnd = (i: number): number => {
+    let k = i;
+    while (k + 1 < n && segments[k + 1].sep !== ';' && segments[k + 1].sep !== '\n') k++;
+    return segments[k].end;
+  };
   let sawAnd = false;
   let sawOr = false;
   for (let i = 0; i < n; i++) {
@@ -173,9 +194,20 @@ export function usedToolsCertain(command: string, tools: readonly string[]): str
       sawOr = true;
     }
     const certain = (!sawAnd && !sawOr) || (sawAnd && !sawOr && finalStatement[i]);
-    if (certain) matchToolInSegment(segments[i].text, tools, used);
+    if (!certain) continue;
+    const hit: string[] = [];
+    matchToolInSegment(segments[i].text, tools, hit);
+    for (const tool of hit) {
+      if (used.includes(tool)) continue;
+      used.push(tool);
+      result.push({ tool, statement: command.slice(stmtStart(i), stmtEnd(i)).replace(/\s+/g, ' ').trim() });
+    }
   }
-  return used;
+  return result;
+}
+
+export function usedToolsCertain(command: string, tools: readonly string[]): string[] {
+  return usedToolStatementsCertain(command, tools).map((s) => s.tool);
 }
 
 /** true when `path` is `dir` itself or lives anywhere under it — a plain `===` would miss e.g.

@@ -509,9 +509,9 @@ test('hook pre-read: caps an unbounded long-file read', async () => {
 });
 
 test('hook post-tool: nudges on a big result, silent otherwise, never blocks', () => {
-  const r1 = runHook('post-tool', { tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(9000) } });
+  const r1 = runHook('post-tool', { tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(36_000) } });
   assert.equal(r1.exit, 0);
-  assert.match(JSON.parse(r1.stdout).hookSpecificOutput.additionalContext, /~2\.3k tok/);
+  assert.match(JSON.parse(r1.stdout).hookSpecificOutput.additionalContext, /~9\.0k tok/);
 
   const r2 = runHook('post-tool', { tool_name: 'Bash', tool_response: { stdout: 'x'.repeat(100) } });
   assert.equal(r2.stdout, '');
@@ -1080,7 +1080,7 @@ test('step 2: post-bash-mark certainty rule + mark provenance in stop-feedback',
 });
 
 test('step 3: post-tool — Edit/Write silent, images silent, WebFetch-specific, Bash fan-out ceiling', () => {
-  const big = 'x'.repeat(12_000); // ~3k tok, over BIG_RESULT_CHARS
+  const big = 'x'.repeat(36_000); // ~9k tok, over the 4× ceiling
   const nag = (tool: string, response: unknown, input: Record<string, unknown> = {}) =>
     runHook('post-tool', { tool_name: tool, tool_input: input, tool_response: response }).stdout;
 
@@ -1106,7 +1106,7 @@ test('step 3: post-tool — Edit/Write silent, images silent, WebFetch-specific,
   assert.match(nag('Bash', { stdout: 'y'.repeat(40_000), stderr: '', interrupted: false, isImage: false }, loopCmd), /trim next time/, 'a loop that still dumps 10k tok gets nagged');
   // other tools: state the size, prescribe nothing (none of the remedies apply generically)
   const grep = nag('Grep', big, { pattern: 'x' });
-  assert.match(grep, /~3\.0k tok/);
+  assert.match(grep, /~9\.0k tok/);
   assert.ok(!grep.includes('squirt'));
 });
 

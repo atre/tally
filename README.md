@@ -138,22 +138,30 @@ response JSON (or, for a hard block, exit 2 with a stderr message):
   on genuine growth, which is a few k.
 - **`pre-bash`** (PreToolUse `Bash`) — rewrites the command via `updatedInput`
   when the fix is mechanical: a raw log dump (`kubectl logs`, `docker logs`,
-  `cat *.log`, …) gets ` | squirt` appended when squirt is on `PATH`; macOS
+  `cat *.log`, …) gets ` | squirt` appended when squirt is on `PATH` — never for
+  a markdown file, a scratchpad file, or a file under 50 lines; macOS
   `sed -i` becomes `sed -i ''`. Blocks (exit 2) only when there's no safe
   rewrite — `curl|sh` style installers. `TALLY_NO_REWRITE=1` turns rewrites
   back into plain blocks.
 - **`pre-read`** (PreToolUse `Read`) — a file over 300 lines read without
   `limit` gets `updatedInput.limit = 300` instead of loading the whole thing;
   same `TALLY_NO_REWRITE=1` escape hatch blocks instead.
-- **`post-tool`** (PostToolUse `.*`) — a result over ~8k chars gets a
-  `additionalContext` nudge to trim next time; never blocks (the tool already
-  ran).
+- **`post-tool`** (PostToolUse `.*`) — nudges via `additionalContext` when a
+  result is over ~32k chars (~8k tok), or over ~8k chars (~2k tok) for a target
+  this session already saw once (same `Read` path / same Bash command — memory
+  in `${TALLY_HOME}/results/<session>`); a first whole read of a mid-size file
+  stays silent. WebFetch keeps its first-time "don't re-fetch" hint. Never
+  blocks (the tool already ran).
 - **`post-bash-mark`** (PostToolUse `Bash`) — notes which personal CLIs
   (looksy/peep/squirt/tally/snuff/brief, or `TALLY_TOOLS`) a session actually
   invoked from outside their own repo — command position only, so `pulse --brief`
   or `cd ~/git/brief` don't count. Tool calls made inside a subagent (`agent_id`
   in the hook input) don't count either — the parent session isn't nagged for a
-  worker's probe. Never blocks.
+  worker's probe. A `| squirt` that `pre-bash` itself injected doesn't count
+  either (the rewrite is recorded in `${TALLY_HOME}/rewrites/<session>` and
+  matched back to the original command). The "marked from" snippet
+  `stop-feedback` repeats is the shell statement that invoked the tool, not the
+  head of the whole command. Never blocks.
 - **`stop-feedback`** (Stop) — blocks (exit 2) when a marked tool's
   `~/git/<tool>/FEEDBACK.md` wasn't touched since; the one hook that can block.
 
